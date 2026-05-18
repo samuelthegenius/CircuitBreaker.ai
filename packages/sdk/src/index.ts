@@ -10,7 +10,16 @@ export class CircuitBreaker {
     this.timeoutMs = config.timeoutMs || 30000; // Default 30s
   }
 
-  async check(prompt: string): Promise<{ allowed: boolean; requestId?: string }> {
+  async check(
+    promptOrToolName: string,
+    args?: Record<string, any>
+  ): Promise<{ allowed: boolean; requestId?: string }> {
+    if (args) {
+      return this.checkToolCall(promptOrToolName, args);
+    }
+
+    const prompt = promptOrToolName;
+
     // 1. Fetch active pre-flight policies
     const { data: policies } = await this.supabase
       .from('policies')
@@ -28,12 +37,12 @@ export class CircuitBreaker {
 
       if (found) {
         if (policy.action === 'block') {
-          await this.logRequest({
+          const requestId = await this.logRequest({
             prompt,
             status: 'blocked',
             policy_id: policy.id,
           });
-          return { allowed: false };
+          return { allowed: false, requestId };
         }
 
         if (policy.action === 'human-in-the-loop') {
@@ -45,6 +54,109 @@ export class CircuitBreaker {
           
           const approved = await this.waitForApproval(requestId);
           return { allowed: approved, requestId };
+        }
+      }
+    }
+
+    return { allowed: true };
+  }
+
+  async checkToolCall(
+    toolName: string,
+    args: Record<string, any>
+  ): Promise<{ allowed: boolean; requestId?: string }> {
+    // 1. Fetch active pre-flight policies
+    const { data: policies } = await this.supabase
+      .from('policies')
+      .select('*')
+      .eq('type', 'pre-flight');
+
+    if (!policies || policies.length === 0) {
+      return { allowed: true };
+    }
+
+    // 2. Evaluate policies
+    for (const policy of policies) {
+      const config = policy.config || {};
+      
+      // Check if policy is structured for a tool-call check
+      const toolMatches = config.toolName && (
+        config.toolName === '*' ||
+        config.toolName.toLowerCase() === toolName.toLowerCase()
+      );
+
+      if (toolMatches && config.field) {
+        let breached = false;
+        let op = config.operator;
+        let target = config.value;
+
+        // Parse condition string if provided, e.g., "> 1000"
+        if (config.condition && typeof config.condition === 'string') {
+          const match = config.condition.trim().match(/^([><]=?|==|!=)?\s*(.*)$/);
+          if (match) {
+            op = match[1] || '==';
+            target = match[2];
+          }
+        }
+
+        const argVal = args[config.field];
+        if (argVal !== undefined) {
+          const numArg = Number(argVal);
+          const numTarget = Number(target);
+          const isNumeric = !isNaN(numArg) && !isNaN(numTarget) && target !== '' && target !== undefined && target !== null;
+
+          if (op === '>') {
+            breached = isNumeric ? numArg > numTarget : String(argVal) > String(target);
+          } else if (op === '<') {
+            breached = isNumeric ? numArg < numTarget : String(argVal) < String(target);
+          } else if (op === '>=') {
+            breached = isNumeric ? numArg >= numTarget : String(argVal) >= String(target);
+          } else if (op === '<=') {
+            breached = isNumeric ? numArg <= numTarget : String(argVal) <= String(target);
+          } else if (op === '==' || op === '===') {
+            breached = isNumeric ? numArg === numTarget : String(argVal) === String(target);
+          } else if (op === '!=' || op === '!==') {
+            breached = isNumeric ? numArg !== numTarget : String(argVal) !== String(target);
+          } else if (op === 'contains') {
+            breached = String(argVal).toLowerCase().includes(String(target).toLowerCase());
+          }
+        }
+
+        if (breached) {
+          const metadata = {
+            toolName,
+            arguments: args,
+            breachedRule: {
+              field: config.field,
+              operator: op,
+              value: target,
+              condition: config.condition
+            }
+          };
+
+          const logPrompt = `Tool call '${toolName}' violated policy '${policy.name}' (field '${config.field}' breached rule: ${op || '=='} ${target})`;
+
+          if (policy.action === 'block') {
+            const requestId = await this.logRequest({
+              prompt: logPrompt,
+              status: 'blocked',
+              policy_id: policy.id,
+              metadata,
+            });
+            return { allowed: false, requestId };
+          }
+
+          if (policy.action === 'human-in-the-loop') {
+            const requestId = await this.logRequest({
+              prompt: logPrompt,
+              status: 'pending',
+              policy_id: policy.id,
+              metadata,
+            });
+            
+            const approved = await this.waitForApproval(requestId);
+            return { allowed: approved, requestId };
+          }
         }
       }
     }

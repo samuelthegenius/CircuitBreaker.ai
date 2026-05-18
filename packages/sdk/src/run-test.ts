@@ -45,7 +45,40 @@ async function testDrive() {
     // This triggers your internal waitForApproval promise loop via Supabase realtime channels
     const test3 = await breaker.check('Let us review our operational roadmap and scale up the server budget.');
 
-    console.log(`\n➔ Async Realtime Core Resolved: ${test3.allowed ? '🟢 APPROVED BY HUMAN OPERATOR' : '🔴 DENIED BY HUMAN OPERATOR'}`);
+    console.log(`\n➔ Async Realtime Core Resolved: ${test3.allowed ? '🟢 APPROVED BY HUMAN OPERATOR' : '🔴 DENIED BY HUMAN OPERATOR'}\n`);
+
+    // --- CASE 4: STRUCTURED B2B TOOL EXECUTION ARGUMENTS CHECK ---
+    console.log('🧪 Test 4: Testing structured tool arguments check...');
+    console.log('Seeding a dynamic rule if not exists: Target Tool: "transfer_funds", Field: "amount", Threshold: > 1000, Action: human-in-the-loop...');
+    
+    // Dynamically insert high-fidelity test rule
+    const { data: existingRule } = await breaker['supabase']
+      .from('policies')
+      .select('*')
+      .eq('name', 'B2B Large Fund Transfer Guard');
+      
+    if (!existingRule || existingRule.length === 0) {
+      await breaker['supabase']
+        .from('policies')
+        .insert([{
+          name: 'B2B Large Fund Transfer Guard',
+          type: 'pre-flight',
+          action: 'human-in-the-loop',
+          config: {
+            toolName: 'transfer_funds',
+            field: 'amount',
+            operator: '>',
+            value: 1000
+          }
+        }]);
+      console.log('✅ Large Fund Transfer policy seeded successfully.');
+    }
+
+    console.log('⚠️ Simulating B2B tool execution: transfer_funds with arguments: { amount: 1500, recipient: "Enterprise Inc" }');
+    console.log('👉 Head over to http://localhost:3000/approvals to see the structured parameter grid and click Approve or Deny.');
+
+    const test4 = await breaker.check('transfer_funds', { amount: 1500, recipient: 'Enterprise Inc' });
+    console.log(`\n➔ Async Realtime Parameter Core Resolved: ${test4.allowed ? '🟢 APPROVED BY HUMAN OPERATOR' : '🔴 DENIED BY HUMAN OPERATOR'}`);
 }
 
 testDrive().catch(console.error);
