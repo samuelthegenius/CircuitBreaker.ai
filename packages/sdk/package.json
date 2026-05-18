@@ -7,7 +7,8 @@
     "build": "tsc",
     "dev": "tsc -w",
     "test:agent": "npm run build && node --env-file=../../.env.local dist/test-agent.js",
-    "test:circuit": "npm run build && node dist/run-test.js"
+    "test:circuit": "npm run build && node dist/run-test.js",
+    "test:structured": "npm run build && node dist/test-structured.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.106.0",
