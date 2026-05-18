@@ -5,12 +5,16 @@
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc",
-    "dev": "tsc -w"
+    "dev": "tsc -w",
+    "test:agent": "npm run build && node --env-file=../../.env.local dist/test-agent.js",
+    "test:circuit": "npm run build && node dist/run-test.js"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.106.0"
+    "@supabase/supabase-js": "^2.106.0",
+    "dotenv": "^17.4.2"
   },
   "devDependencies": {
+    "@types/node": "^25.9.0",
     "typescript": "^6.0.3"
   }
 }

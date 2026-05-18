@@ -123,3 +123,133 @@ export class CircuitBreaker {
     });
   }
 }
+
+export interface VerifyAgentActionParams {
+  sessionId: string;
+  toolName: string;
+  estimatedCostCents: number;
+  payload: Record<string, any>;
+}
+
+export interface VerifyAgentActionResult {
+  status: 'ALLOWED' | 'BLOCKED' | 'PAUSED';
+  reason?: string;
+}
+
+export async function verifyAgentAction(
+  params: VerifyAgentActionParams
+): Promise<VerifyAgentActionResult> {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
+  const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
+
+  if (!supabaseUrl || !supabaseKey) {
+    return {
+      status: 'BLOCKED',
+      reason: 'Supabase credentials are not configured in environment variables.'
+    };
+  }
+
+  const supabase = createClient(supabaseUrl, supabaseKey);
+
+  // 1. Fetch active session
+  const { data: session, error: sessionError } = await supabase
+    .from('agent_sessions')
+    .select('*')
+    .eq('id', params.sessionId)
+    .single();
+
+  if (sessionError || !session) {
+    return {
+      status: 'BLOCKED',
+      reason: `Failed to find agent session: ${sessionError?.message || 'Not found'}`
+    };
+  }
+
+  // 2. Check session status
+  if (session.status !== 'active') {
+    return {
+      status: 'BLOCKED',
+      reason: `Agent session is not active. Current status: ${session.status}`
+    };
+  }
+
+  // 3. Scenario A: Budget limit check
+  const newSpend = (session.current_spend_cents || 0) + params.estimatedCostCents;
+  if (newSpend > (session.max_budget_cents || 0)) {
+    await supabase
+      .from('agent_sessions')
+      .update({ status: 'blocked' })
+      .eq('id', params.sessionId);
+
+    return {
+      status: 'BLOCKED',
+      reason: `Budget exceeded. Limit: $${((session.max_budget_cents || 0) / 100).toFixed(2)}, Attempted: $${(newSpend / 100).toFixed(2)}`
+    };
+  }
+
+  // 4. Scenario A: Tool call limit check
+  const newToolCalls = (session.current_tool_calls || 0) + 1;
+  if (newToolCalls > (session.max_tool_calls || 0)) {
+    await supabase
+      .from('agent_sessions')
+      .update({ status: 'blocked' })
+      .eq('id', params.sessionId);
+
+    return {
+      status: 'BLOCKED',
+      reason: `Tool call limit exceeded. Limit: ${session.max_tool_calls}, Attempted: ${newToolCalls}`
+    };
+  }
+
+  // 5. Scenario B: SQL Injection check
+  const payloadString = JSON.stringify(params.payload).toLowerCase();
+  const sqlInjectionPattern = /drop\s+table|delete\s+from|union\s+select|--/;
+  const isSqlInjection = params.toolName === 'run_sql' && (
+    sqlInjectionPattern.test(payloadString) || payloadString.includes('drop table') || payloadString.includes('delete from')
+  );
+
+  if (isSqlInjection) {
+    await supabase
+      .from('agent_sessions')
+      .update({ status: 'paused' })
+      .eq('id', params.sessionId);
+
+    // Create a pending review request in intercepted_requests
+    await supabase
+      .from('intercepted_requests')
+      .insert({
+        prompt: `Blocked risky action '${params.toolName}' with payload: ${JSON.stringify(params.payload)}`,
+        status: 'pending',
+        metadata: {
+          session_id: params.sessionId,
+          tool_name: params.toolName,
+          payload: params.payload
+        }
+      });
+
+    return {
+      status: 'PAUSED',
+      reason: 'Risky execution pattern detected. Action paused for review.'
+    };
+  }
+
+  // 6. Update session state if allowed
+  const { error: updateError } = await supabase
+    .from('agent_sessions')
+    .update({
+      current_spend_cents: newSpend,
+      current_tool_calls: newToolCalls
+    })
+    .eq('id', params.sessionId);
+
+  if (updateError) {
+    return {
+      status: 'BLOCKED',
+      reason: `Failed to update agent session: ${updateError.message}`
+    };
+  }
+
+  return {
+    status: 'ALLOWED'
+  };
+}
